@@ -6,7 +6,8 @@ import time
 from urllib.parse import urlparse
 
 import yaml
-from jsonschema import ValidationError, validate
+from jsonschema import Draft7Validator, ValidationError, validate
+
 
 
 class DriftReport:

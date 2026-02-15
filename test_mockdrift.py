@@ -6,7 +6,8 @@ import time
 import pytest
 import yaml
 
-from mockdrift_core import MockDriftDetector, to_sarif
+from mockdrift_core import MockDriftDetector, VCRCassetteDriftChecker, DriftResult, to_sarif
+
 
 SPEC = {
     "openapi": "3.0.0",
@@ -115,3 +116,99 @@ def test_report_to_dict_roundtrip(detector):
     assert d["method"] == "get"
     assert d["path"] == "/users/{id}"
     assert isinstance(d["errors"], list)
+
+
+# ---------------------------------------------------------------------------
+# VCR Cassette Drift Tests
+# ---------------------------------------------------------------------------
+
+FIXTURES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+
+
+@pytest.fixture
+def checker(tmp_path):
+    """VCRCassetteDriftChecker wired to our test spec."""
+    p = tmp_path / "spec.json"
+    p.write_text(json.dumps(SPEC))
+    return VCRCassetteDriftChecker(str(p))
+
+
+def test_vcr_cassette_valid_no_drift(checker):
+    """(a) Cassette whose response exactly matches the schema — no drift."""
+    path = os.path.join(FIXTURES_DIR, "cassette_valid.yaml")
+    results = checker.check(path)
+    assert len(results) == 1
+    r = results[0]
+    assert not r.drifted
+    assert r.errors == []
+    assert r.cassette_file == "cassette_valid.yaml"
+    assert r.interaction_index == 0
+    assert r.path == "/users/{id}"
+    assert r.method == "get"
+    assert r.status_code == "200"
+    assert r.actual_keys_diff == {}
+
+
+def test_vcr_cassette_extra_fields_drift(checker):
+    """(b) Cassette with extra fields not in the schema — should drift."""
+    path = os.path.join(FIXTURES_DIR, "cassette_extra_fields.yaml")
+    results = checker.check(path)
+    assert len(results) == 1
+    r = results[0]
+    assert r.drifted
+    assert r.cassette_file == "cassette_extra_fields.yaml"
+    assert r.interaction_index == 0
+    assert "extra" in r.actual_keys_diff
+    assert "role" in r.actual_keys_diff["extra"]
+    assert "avatar_url" in r.actual_keys_diff["extra"]
+    # jsonschema errors should mention additional properties
+    assert len(r.errors) > 0
+
+
+def test_vcr_cassette_missing_required_drift(checker):
+    """(c) Cassette missing required fields — should drift."""
+    path = os.path.join(FIXTURES_DIR, "cassette_missing_required.yaml")
+    results = checker.check(path)
+    assert len(results) == 1
+    r = results[0]
+    assert r.drifted
+    assert r.cassette_file == "cassette_missing_required.yaml"
+    assert r.interaction_index == 0
+    assert "missing" in r.actual_keys_diff
+    assert "id" in r.actual_keys_diff["missing"]
+    assert "email" in r.actual_keys_diff["missing"]
+    # jsonschema must flag missing required props
+    assert any("id" in e or "email" in e for e in r.errors)
+
+
+def test_vcr_cassette_wrong_type_drift(checker):
+    """(d) Cassette with wrong value types — should drift."""
+    path = os.path.join(FIXTURES_DIR, "cassette_wrong_type.yaml")
+    results = checker.check(path)
+    assert len(results) == 1
+    r = results[0]
+    assert r.drifted
+    assert r.cassette_file == "cassette_wrong_type.yaml"
+    assert r.interaction_index == 0
+    # At least two type errors (id should be int, email should be string)
+    assert len(r.errors) >= 2
+    # Errors should mention type issues
+    error_text = " ".join(r.errors)
+    assert "integer" in error_text or "not of type" in error_text or "type" in error_text.lower()
+
+
+def test_drift_result_to_dict(checker):
+    """DriftResult.to_dict() should contain all required locator fields."""
+    path = os.path.join(FIXTURES_DIR, "cassette_missing_required.yaml")
+    results = checker.check(path)
+    d = results[0].to_dict()
+    assert "cassette_file" in d
+    assert "interaction_index" in d
+    assert "path" in d
+    assert "method" in d
+    assert "status_code" in d
+    assert "expected_schema" in d
+    assert "actual_keys_diff" in d
+    assert "drifted" in d
+    assert "errors" in d
+    assert d["drifted"] is True
